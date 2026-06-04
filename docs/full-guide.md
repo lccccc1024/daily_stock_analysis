@@ -598,6 +598,15 @@ conda activate stock
 pip install -r requirements.txt
 ```
 
+Windows PowerShell 若仍使用系统默认代码页，首次安装依赖或运行环境检查前建议先启用 UTF-8，避免第三方工具或终端输出在中文字符上失败：
+
+```powershell
+$env:PYTHONUTF8='1'
+$env:PYTHONIOENCODING='utf-8'
+python -m pip install -r requirements.txt
+python scripts/check_env.py --config
+```
+
 **智能导入依赖**：`pypinyin`（名称→代码拼音匹配）和 `openpyxl`（Excel .xlsx 解析）已包含在 `requirements.txt` 中，执行上述 `pip install -r requirements.txt` 时会自动安装。若使用智能导入（图片/CSV/Excel/剪贴板）功能，请确保依赖已正确安装；缺失时可能报 `ModuleNotFoundError`。
 
 ### 命令行参数
@@ -780,6 +789,12 @@ P4a 新增 `analysis_phase=auto|premarket|intraday|postmarket` 请求参数，�
 
 `auto` 保持既有交易日历推断；非 `auto` 只覆盖 phase 并重算 `is_trading_day`、`is_market_open_now`、`is_partial_bar`、`minutes_to_open` 和 `minutes_to_close`。覆盖不会改写真实 `market_local_time` 或 `effective_daily_bar_date`；如果当前日期不是交易日或日历不支持对应 session，分钟字段可以为空。
 
+#### Web 阶段标签展示（Issue #1386 P4b）
+
+P4b 在 Web 端补齐阶段可见性，但不新增阶段覆盖 selector。进行中的任务面板只展示 P4a 回显的请求阶段 `analysis_phase`，其中 `auto` 明确显示为“自动阶段”，不伪装成最终推断阶段。最终报告页以 `report.meta.market_phase_summary.phase` 展示实际市场阶段标签，并在 `is_partial_bar=true` 时提示“日线未完成”。
+
+数据质量摘要继续复用 `report.details.analysis_context_pack_overview.data_quality` 和现有 `AnalysisContextSummary`；Web 会在同一报告详情页展示阶段标签，并继续复用低敏数据质量摘要，不暴露完整 `AnalysisContextPack`、Prompt summary、raw payload 或已剥离的 snapshot 内部字段。历史列表、Bot、schedule、GitHub Actions、Desktop、通知摘要和高级阶段覆盖入口仍为后续工作。
+
 #### AnalysisContextPack Prompt 摘要（Issue #1389 P3）
 
 P3 在普通分析和 Agent 初始上下文中接入 `AnalysisContextPack` 低敏摘要。Pipeline 会用已获取的行情、日线、趋势、筹码、基本面、新闻和市场阶段 artifacts 组装 pack，再把 `analysis_context_pack_summary` 插入 Prompt；在这个新增的 pack 摘要区块中，LLM 只看到 subject、版本、各数据块的状态/来源/warning/missing reason 和新闻结果数，不会通过该区块看到完整 `news.content`、`trend_result`、筹码或基本面原始 payload。既有 `news_context`、Agent pre-fetched JSON 和 `enhanced_context` 原始数据通道保持 P3 前行为，不由本摘要替代或脱敏。
@@ -805,6 +820,18 @@ P5 在不修改 `PACK_VERSION = "1.0"`、不新增数据源和不改变报告 JS
 P5 在个股分析报告的 `dashboard.phase_decision` 中追加阶段化决策字段：`phase_context`、`action_window`、`immediate_action`、`watch_conditions`、`next_check_time`、`confidence_reason` 和 `data_limitations`。该字段只作为报告 JSON 的向后兼容扩展进入历史 `raw_result`；不新增 `analysis_phase` API 参数、不改变 Web 阶段入口、不新增配置项，也不影响每日收盘复盘默认行为。
 
 普通分析与 Agent 分析会在保存历史前复用当次 `market_phase_summary` 和 `analysis_context_pack_overview.data_quality` 执行轻量护栏：核心 quote / daily_bars / technical 数据 stale、fallback、missing、fetch_failed、partial 或 estimated 时，不允许高置信结论；盘前、非交易日或未知阶段不得输出高置信盘中买卖；盘中、午间和临近收盘会检查主结论里的盘后复盘口吻，并把明显的“今日收盘后复盘显示”“明日重点关注”类措辞改为阶段安全的观察/等待表述。护栏只补低敏 `phase_context` 和数据限制，不编造观察条件或下一次检查时间；通知摘要、告警、持仓和回测联动留给后续 P6。
+
+#### 告警、持仓和历史联动（Issue #1386 P6）
+
+P6 将既有 `market_phase_summary` 与 `analysis_context_pack_overview` 复用到告警、持仓、历史、回测和通知链路，不新增 phase/pack 协议，也不做数据库迁移。告警触发记录仍使用现有 `diagnostics` 文本字段；当 diagnostics 可 JSON 化时，worker 会在 `status=triggered` 记录中合并写入 `analysis_visibility.market_phase_summary`、`analysis_visibility.analysis_context_pack_overview` 和 `analysis_visibility.source`。旧纯文本 diagnostics 继续保留原文，Alert API 派生字段为空且 `analysis_visibility_source=legacy_text`。
+
+告警 phase 摘要来自触发时上下文：symbol 目标按股票市场推断，`target_scope=market` 直接使用 `cn|hk|us` 市场区域，账户级无法唯一定位时允许落为 `unknown`。pack overview 只来自评估器已带 overview 或最近 30 天历史 snapshot 的低敏 overview，缺失时返回 `null`，不伪造 pack，不自动触发轻量 LLM 分析。公开 source 取值为 `alert_trigger_market_context`、`analysis_history_snapshot`、`evaluator_snapshot`、`legacy_text` 或 `null`。
+
+持仓页新增手动单股分析入口，对应 `POST /api/v1/portfolio/positions/{symbol}/analysis`。请求字段为 `account_id`、`analysis_phase=auto|premarket|intraday|postmarket` 和 `force`；只有当前持仓快照中非零持仓可提交，无持仓返回 404，多账户同持一只股票但未传 `account_id` 返回 `400 ambiguous_position_account`。该入口沿用异步任务 accepted / duplicate 语义，`force` 只影响分析刷新，不绕过 in-flight duplicate。后端只把低敏 `portfolio_context` 传入内部 pipeline 和 context pack 的可选 `portfolio` block；该 block 不参与既有六块数据质量总分，也不会出现在任务列表或 SSE payload 中。
+
+历史列表、单股历史、StockBar 和详情会从 `context_snapshot` 提取 `market_phase_summary`；旧记录、缺失 snapshot 或解析失败返回 `null`。回测结果项增加 `market_phase` 与 `market_phase_summary`，结果列表和 performance/summary 查询支持 `analysis_phase=premarket|intraday|postmarket|unknown`；统计统一把 `intraday`、`lunch_break`、`closing_auction` 归入 intraday，把 `non_trading`、缺失和非法值归入 unknown。带 phase 过滤的回测查询会在 repository 层按 SQL 条件批量读取结果和 snapshot，先 bucket 再分页，并在 summary diagnostics 中返回 `phase_breakdown` 与 `raw_phase_counts`。
+
+通知摘要复用统一公开格式化 helper，只输出阶段标签、trigger source、partial-bar warning、数据质量等级和前两条 limitations；不会输出 raw context pack、Prompt、新闻正文或持仓敏感明细。Web 告警历史、持仓、历史列表、StockBar 和回测页同步展示阶段 badge、质量摘要、phase filter 与 breakdown。
 
 #### 使用 Crontab
 

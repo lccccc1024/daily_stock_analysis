@@ -537,6 +537,15 @@ conda activate stock
 pip install -r requirements.txt
 ```
 
+On Windows PowerShell, if Python or pip still uses the system default code page, enable UTF-8 before the first dependency install or environment check. This keeps terminal output and third-party tooling from failing on non-ASCII text:
+
+```powershell
+$env:PYTHONUTF8='1'
+$env:PYTHONIOENCODING='utf-8'
+python -m pip install -r requirements.txt
+python scripts/check_env.py --config
+```
+
 ### Command Line Arguments
 
 ```bash
@@ -657,6 +666,12 @@ Market-phase context construction still supports the legacy internal `analysis_i
 
 `auto` preserves existing calendar inference. Non-`auto` values only override the phase and recompute `is_trading_day`, `is_market_open_now`, `is_partial_bar`, `minutes_to_open`, and `minutes_to_close`. The override does not rewrite the real `market_local_time` or `effective_daily_bar_date`; if the current date is not a trading session or the calendar cannot support the session, minute fields may be empty.
 
+### Web Phase Labels (Issue #1386 P4b)
+
+P4b completes the Web visibility slice without adding a phase override selector. The in-progress TaskPanel only shows the requested `analysis_phase` echoed by P4a; in the current task-panel UI, `auto` is explicitly labeled as the requested automatic phase (`请求阶段: 自动阶段`) and is not presented as the final inferred phase. The final report page renders the actual market phase from `report.meta.market_phase_summary.phase`, and shows a `Partial bar` marker when `is_partial_bar=true`.
+
+Data-quality visibility continues to reuse `report.details.analysis_context_pack_overview.data_quality` and the existing `AnalysisContextSummary` component. The Web UI only displays the phase label alongside the low-sensitivity data-quality summary; it does not expose the full `AnalysisContextPack`, prompt summary, raw payloads, or stripped snapshot internals. History-list fields, Bot, schedule, GitHub Actions, Desktop, notification summaries, and advanced phase override UI remain follow-up work.
+
 ### AnalysisContextPack Prompt Summary (Issue #1389 P3)
 
 P3 injects a low-sensitivity `AnalysisContextPack` summary into regular analysis and Agent initial prompts. The pipeline builds the pack from already-fetched quote, daily-bar, trend, chip, fundamentals, news, and market-phase artifacts, then passes `analysis_context_pack_summary` downstream; in this new pack-summary section, the LLM only sees subject, version, data-block status/source/warnings/missing reason, and news result count, not full `news.content`, `trend_result`, chip, or fundamentals raw payloads through that section. On the Agent path, the pipeline reads `storage.get_analysis_context()` once after history prefetch to drive the daily-bars status, and marks `daily_bars_missing` only when that read has no usable context. Existing `news_context`, Agent pre-fetched JSON, and `enhanced_context` raw-payload channels keep their pre-P3 behavior and are not replaced or sanitized by this summary.
@@ -682,6 +697,18 @@ History detail, sync analysis responses, and completed task status responses sti
 P5 adds a phase-aware decision block under `dashboard.phase_decision` for individual stock analysis reports: `phase_context`, `action_window`, `immediate_action`, `watch_conditions`, `next_check_time`, `confidence_reason`, and `data_limitations`. This is a backward-compatible report JSON addition stored in historical `raw_result`; it does not add an `analysis_phase` API parameter, change Web phase entrypoints, add configuration, or change the default post-market daily review behavior.
 
 Regular analysis and Agent analysis now apply lightweight guardrails before history is saved, using the current `market_phase_summary` and `analysis_context_pack_overview.data_quality`. If core quote / daily_bars / technical data is stale, fallback, missing, fetch_failed, partial, or estimated, high-confidence conclusions are capped. Pre-market, non-trading, or unknown phases must not emit high-confidence intraday buy/sell actions. Intraday, lunch-break, and near-close outputs are scanned for post-market recap wording such as "after today's close" or "focus tomorrow" in the main conclusion and action fields, and obvious violations are replaced with phase-safe wait/watch wording. The guardrail only fills low-sensitivity `phase_context` and data limitations; it does not invent watch conditions or next-check times. Notification summaries, alerts, holdings, and backtest linkage remain later P6 work.
+
+### Alerts, Portfolio, and History Linkage (Issue #1386 P6)
+
+P6 reuses the existing `market_phase_summary` and `analysis_context_pack_overview` across alerts, portfolio, history, backtesting, and notifications. It does not introduce a new phase/pack protocol and does not require a database migration. Alert trigger rows keep using the existing text `diagnostics` field; when diagnostics can be represented as JSON, the worker merges `analysis_visibility.market_phase_summary`, `analysis_visibility.analysis_context_pack_overview`, and `analysis_visibility.source` into triggered rows. Legacy plain-text diagnostics remain readable; Alert API derived fields stay empty and `analysis_visibility_source=legacy_text`.
+
+Alert phase summaries are generated from trigger-time context: symbol targets infer the stock market, `target_scope=market` uses the `cn|hk|us` region directly, and account-level targets that cannot map to a single market may fall back to `unknown`. The pack overview only comes from an evaluator-provided overview or a recent low-sensitivity history snapshot from the last 30 days. Missing data returns `null`; the alert worker does not fabricate packs and does not automatically run a lightweight LLM analysis. Public source values are `alert_trigger_market_context`, `analysis_history_snapshot`, `evaluator_snapshot`, `legacy_text`, or `null`.
+
+The portfolio page adds a manual per-position analysis action backed by `POST /api/v1/portfolio/positions/{symbol}/analysis`. The request accepts `account_id`, `analysis_phase=auto|premarket|intraday|postmarket`, and `force`. Only non-zero current holdings can be submitted; missing holdings return 404, and the same symbol held in multiple accounts without `account_id` returns `400 ambiguous_position_account`. The endpoint keeps the existing async accepted / duplicate semantics, and `force` only controls refresh behavior; it does not bypass in-flight duplicate detection. The backend passes only a low-sensitivity `portfolio_context` internally into the pipeline and into an optional context-pack `portfolio` block. That block does not affect the six existing data-quality weights and is not exposed through task lists or SSE payloads.
+
+History lists, same-stock history, StockBar items, and details extract `market_phase_summary` from `context_snapshot`; old rows, missing snapshots, or parse failures return `null`. Backtest result items now include `market_phase` and `market_phase_summary`, and result/performance/summary queries support `analysis_phase=premarket|intraday|postmarket|unknown`. Statistics fold `intraday`, `lunch_break`, and `closing_auction` into intraday, and fold `non_trading`, missing, and invalid values into unknown. Phase-filtered backtest queries batch-read results and snapshots through the repository, bucket before pagination, and expose `phase_breakdown` plus `raw_phase_counts` in summary diagnostics.
+
+Notification summaries use one public formatting helper and only include the phase label, trigger source, partial-bar warning, data-quality level, and the first two limitations. They do not output raw context packs, prompts, news body text, or sensitive portfolio details. The Web Alerts, Portfolio, History, StockBar, and Backtest pages display the new phase badges, quality summary, phase filter, and breakdown.
 
 ---
 
